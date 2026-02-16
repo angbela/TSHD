@@ -1,7 +1,3 @@
-"""
-Streamlit App for TSHD Dredging Discrete Event Simulation
-Interactive web interface for configuring and running simulations
-"""
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -206,7 +202,7 @@ def main():
         )
 
         with tab_project:
-            st.subheader("Project Parameters (Contractor View)")
+            st.subheader("Project Parameters")
             target_volume = st.number_input(
                 "Total Material to be Dredged (m³)",
                 min_value=1_000.0,
@@ -510,3 +506,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
