@@ -1,3 +1,7 @@
+"""
+Streamlit App for TSHD Dredging Discrete Event Simulation
+Interactive web interface for configuring and running simulations
+"""
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -5,6 +9,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from des_framework import Simulation
 from tshd import TSHD, TSHDConfig, TSHDState
+from segments import SegmentManager
 
 # Page configuration
 st.set_page_config(
@@ -34,7 +39,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def run_simulation_streamlit(fleet_vessels, target_volume: float):
+def run_simulation_streamlit(fleet_vessels, target_volume: float, segment_manager: SegmentManager | None = None):
     """
     Run simulation until the target volume is dredged and return results.
 
@@ -42,6 +47,7 @@ def run_simulation_streamlit(fleet_vessels, target_volume: float):
     """
     sim = Simulation()
     sim.run_id = f"run_{int(np.random.randint(0, 1_000_000_000))}"
+    sim.segment_manager = segment_manager
     dredgers = []
 
     cycle_times = []
@@ -88,15 +94,20 @@ def _collect_duration_samples(dredgers, run_idx: int):
         dredger_type = getattr(dredger, "type_label", dredger.entity_id)
         for e in dredger.event_log:
             if "duration_h" in e and "task" in e:
-                rows.append(
-                    {
-                        "run": run_idx,
-                        "dredger": dredger.entity_id,
-                        "dredger_type": dredger_type,
-                        "task": e["task"],
-                        "duration_h": float(e["duration_h"]),
-                    }
-                )
+                row = {
+                    "run": run_idx,
+                    "dredger": dredger.entity_id,
+                    "dredger_type": dredger_type,
+                    "task": e["task"],
+                    "duration_h": float(e["duration_h"]),
+                }
+                if "segment" in e:
+                    row["segment"] = e["segment"]
+                if "distance_nm" in e:
+                    row["distance_nm"] = float(e["distance_nm"])
+                if "volume_m3" in e:
+                    row["volume_m3"] = float(e["volume_m3"])
+                rows.append(row)
     return rows
 
 def create_state_timeline(dredgers, simulation_time):
@@ -202,7 +213,10 @@ def main():
         )
 
         with tab_project:
-            st.subheader("Project Parameters")
+            st.subheader("Project Parameters (Contractor View)")
+
+            use_segmentation = st.checkbox("Use channel segmentation", value=False, key="use_segmentation")
+
             target_volume = st.number_input(
                 "Total Material to be Dredged (m³)",
                 min_value=1_000.0,
@@ -211,6 +225,7 @@ def main():
                 step=1_000.0,
                 help="Total project volume to be dredged",
                 key="target_volume",
+                disabled=use_segmentation,
             )
 
             colp1, colp2 = st.columns(2)
@@ -222,10 +237,52 @@ def main():
                     value=5.0,
                     step=0.5,
                     key="distance_to_da",
+                    disabled=use_segmentation,
                 )
             with colp2:
                 st.caption("Assumption: distance back = distance to DA")
                 distance_back = float(distance_to_da)
+
+            segment_manager = None
+            if use_segmentation:
+                st.markdown("**Segments table (Segment / Volume m³)**")
+                default_segments = pd.DataFrame(
+                    {
+                        "Segment": [1, 2, 3, 4, 5, 6, 7, 8],
+                        "Volume": [387_371, 1_476_950, 552_566, 66_186, 217, 189_128, 0, 14_676],
+                    }
+                )
+                seg_df = st.data_editor(
+                    default_segments,
+                    use_container_width=True,
+                    num_rows="fixed",
+                    key="segments_table",
+                )
+
+                segment_length_nm = st.number_input(
+                    "Segment length (nm)",
+                    min_value=0.1,
+                    max_value=50.0,
+                    value=1.0,
+                    step=0.1,
+                    help="Equal length for all segments. Segment 1 is nearest to DA reference point.",
+                    key="segment_length_nm",
+                )
+
+                # sanitize volumes
+                seg_df = seg_df.copy()
+                seg_df["Volume"] = pd.to_numeric(seg_df["Volume"], errors="coerce").fillna(0.0)
+                seg_df["Volume"] = seg_df["Volume"].clip(lower=0.0)
+
+                segment_volumes = seg_df.sort_values("Segment")["Volume"].tolist()
+                target_volume = float(sum(segment_volumes))
+                st.info(f"Target volume is derived from segments: {target_volume:,.0f} m³")
+
+                segment_manager = SegmentManager(segment_volumes_m3=segment_volumes, segment_length_nm=float(segment_length_nm))
+                # in segmentation mode, distance to DA is derived from segment index:
+                # distance_nm = (segment_index - 1) * segment_length_nm
+                distance_to_da = 0.0
+                distance_back = 0.0
 
         with tab_fleet:
             st.subheader("Fleet (Multiple Dredger Types)")
@@ -408,7 +465,12 @@ def main():
                 if use_fixed_seed:
                     np.random.seed(int(seed_value) + run_idx)
 
-                sim, dredgers = run_simulation_streamlit(fleet_vessels, target_volume)
+                # IMPORTANT: Segment manager must be per-run (it is stateful)
+                sm_for_run = None
+                if use_segmentation and segment_manager is not None:
+                    sm_for_run = SegmentManager(segment_manager.remaining_m3, segment_manager.segment_length_nm)
+
+                sim, dredgers = run_simulation_streamlit(fleet_vessels, target_volume, segment_manager=sm_for_run)
                 sims.append(sim)
                 dredgers_by_run.append(dredgers)
 
@@ -446,6 +508,38 @@ def main():
             use_container_width=True,
             hide_index=True,
         )
+
+        if "segment" in durations_df.columns and durations_df["segment"].notna().any():
+            st.subheader("📍 Segment recap")
+            seg_df = durations_df[durations_df["segment"].notna()].copy()
+            seg_df["segment"] = seg_df["segment"].astype(int)
+
+            vol_df = (
+                seg_df[seg_df["task"] == "dredging"]
+                .dropna(subset=["volume_m3"])
+                .groupby("segment")["volume_m3"]
+                .sum()
+            )
+
+            dist_df = (
+                seg_df.dropna(subset=["distance_nm"])
+                .groupby("segment")["distance_nm"]
+                .mean()
+            )
+
+            work_df = seg_df.groupby("segment")["duration_h"].sum()
+
+            all_segments = sorted(set(vol_df.index) | set(dist_df.index) | set(work_df.index))
+            recap_df = pd.DataFrame({"Segment": all_segments})
+            recap_df["Volume"] = recap_df["Segment"].map(vol_df).fillna(0.0)
+            recap_df["Average_distance_DA"] = recap_df["Segment"].map(dist_df)
+            recap_df["Total_working_hours"] = recap_df["Segment"].map(work_df).fillna(0.0)
+
+            st.dataframe(
+                recap_df,
+                use_container_width=True,
+                hide_index=True,
+            )
 
         # Diagnostics (collapsed by default for neat results)
         with st.expander("📈 Work task duration PDFs (stochastic evidence)", expanded=False):
@@ -506,4 +600,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -290,6 +290,7 @@ class TSHD:
                 "time": sim.clock,
                 "task": "dumping",
                 "duration_h": actual_dumping_time,
+                "segment": self.current_segment_index,
                 "state": self.state.value,
             }
         )
@@ -322,7 +323,7 @@ class TSHD:
             time=sim.clock + actual_dumping_time,
             event_type=EventType.DUMPING_COMPLETE,
             entity_id=self.entity_id,
-            data={'actual_dumping_time': actual_dumping_time}
+            data={'actual_dumping_time': actual_dumping_time, 'distance_to_da_nm': distance_to_da_nm}
         ))
     
     def _start_dumping(self, event: Event, sim: Simulation):
@@ -368,6 +369,7 @@ class TSHD:
                 "task": "moving_back",
                 "duration_h": travel_time,
                 "distance_nm": distance_to_da_nm,
+                "segment": self.current_segment_index,
                 "state": self.state.value,
             }
         )
